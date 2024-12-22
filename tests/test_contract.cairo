@@ -1,47 +1,172 @@
+use sn_bc_11::Counter;
 use starknet::ContractAddress;
 
-use snforge_std::{declare, ContractClassTrait, DeclareResultTrait};
+use snforge_std::{
+    declare, ContractClassTrait, DeclareResultTrait, start_cheat_caller_address,
+    stop_cheat_caller_address, spy_events, EventSpyAssertionsTrait,
+};
 
-use sn_bc_11::IHelloStarknetSafeDispatcher;
-use sn_bc_11::IHelloStarknetSafeDispatcherTrait;
-use sn_bc_11::IHelloStarknetDispatcher;
-use sn_bc_11::IHelloStarknetDispatcherTrait;
+use sn_bc_11::{
+    ICounterDispatcher, ICounterDispatcherTrait, ICounterSafeDispatcher,
+    ICounterSafeDispatcherTrait,
+};
 
-fn deploy_contract(name: ByteArray) -> ContractAddress {
-    let contract = declare(name).unwrap().contract_class();
-    let (contract_address, _) = contract.deploy(@ArrayTrait::new()).unwrap();
-    contract_address
+use Counter::Errors::NEGATIVE_COUNTER;
+
+fn OWNER() -> ContractAddress {
+    'OWNER'.try_into().unwrap()
+}
+
+fn deploy_counter(initial_count: u32) -> (ICounterDispatcher, ICounterSafeDispatcher) {
+    let contract = declare("Counter").unwrap().contract_class();
+
+    // serialize the calldata
+    let mut calldata = array![];
+    initial_count.serialize(ref calldata);
+    OWNER().serialize(ref calldata);
+
+    let (contract_address, _) = contract.deploy(@calldata).unwrap();
+
+    let dispatcher = ICounterDispatcher { contract_address };
+    let safe_dispatcher = ICounterSafeDispatcher { contract_address };
+
+    (dispatcher, safe_dispatcher)
 }
 
 #[test]
-fn test_increase_balance() {
-    let contract_address = deploy_contract("HelloStarknet");
+fn test_deploy_contract() {
+    let initial_count = 0;
+    let (counter, _) = deploy_counter(initial_count);
 
-    let dispatcher = IHelloStarknetDispatcher { contract_address };
+    let current_counter = counter.get_counter();
+    assert!(current_counter == initial_count, "count should be initial count")
+}
 
-    let balance_before = dispatcher.get_balance();
-    assert(balance_before == 0, 'Invalid balance');
+#[test]
+fn test_increase_counter() {
+    let initial_count = 0;
+    let (counter, _) = deploy_counter(initial_count);
+    let mut spy = spy_events();
 
-    dispatcher.increase_balance(42);
+    counter.increase_counter();
 
-    let balance_after = dispatcher.get_balance();
-    assert(balance_after == 42, 'Invalid balance');
+    let expected_count = initial_count + 1;
+    let current_count = counter.get_counter();
+    spy
+        .assert_emitted(
+            @array![
+                (
+                    counter.contract_address,
+                    Counter::Event::CounterIncreased(
+                        Counter::CounterIncreased { counter: current_count },
+                    ),
+                ),
+            ],
+        );
+
+    assert!(current_count == expected_count, "Counter should increment")
+}
+
+#[test]
+fn test_get_counter() {
+    let initial_count = 12;
+    let (counter, _) = deploy_counter(initial_count);
+
+    let current_count = counter.get_counter();
+    assert!(current_count == initial_count, "get_counter should return initial count");
+
+    counter.increase_counter();
+    let new_count = counter.get_counter();
+    assert!(new_count == initial_count + 1, "get_counter should return updated count after increase");
+
+    counter.decrease_counter();
+    let final_count = counter.get_counter();
+    assert!(final_count == initial_count, "get_counter should return updated count after decrease");
+}
+
+#[test]
+fn test_decrease_counter() {
+    let initial_count = 1;
+    let (counter, _) = deploy_counter(initial_count);
+    let mut spy = spy_events();
+
+    counter.decrease_counter();
+
+    let expected_count = initial_count - 1;
+    let current_count = counter.get_counter();
+
+    spy
+        .assert_emitted(
+            @array![
+                (
+                    counter.contract_address,
+                    Counter::Event::CounterDecreased(
+                        Counter::CounterDecreased { counter: current_count },
+                    ),
+                ),
+            ],
+        );
+    assert!(current_count == expected_count, "Counter should decrement")
 }
 
 #[test]
 #[feature("safe_dispatcher")]
-fn test_cannot_increase_balance_with_zero_value() {
-    let contract_address = deploy_contract("HelloStarknet");
+fn test_decrease_counter_underflow() {
+    let initial_count = 0;
+    let (_, safe_counter) = deploy_counter(initial_count);
 
-    let safe_dispatcher = IHelloStarknetSafeDispatcher { contract_address };
-
-    let balance_before = safe_dispatcher.get_balance().unwrap();
-    assert(balance_before == 0, 'Invalid balance');
-
-    match safe_dispatcher.increase_balance(0) {
-        Result::Ok(_) => core::panic_with_felt252('Should have panicked'),
+    match safe_counter.decrease_counter() {
+        Result::Ok(_) => panic!("Decrease below 0 did not panic"),
         Result::Err(panic_data) => {
-            assert(*panic_data.at(0) == 'Amount cannot be 0', *panic_data.at(0));
-        }
-    };
+            assert!(
+                *panic_data[0] == NEGATIVE_COUNTER,
+                "Should throw NEGATIVE COUNTER error",
+            )
+        },
+    }
+}
+
+#[test]
+#[should_panic]
+fn test_increase_counter_overflow() {
+    let initial_count = 0xFFFFFFFF;
+    let (counter, _) = deploy_counter(initial_count);
+    counter.increase_counter();
+}
+
+#[test]
+#[feature("safe_dispatcher")]
+fn test_reset_counter_non() {
+    let initial_count = 5;
+    let (counter, safe_counter) = deploy_counter(initial_count);
+
+    match safe_counter.reset_counter() {
+        Result::Ok(_) => panic!("non-owner cannot reset the counter"),
+        Result::Err(panic_data) => {
+            assert!(
+                *panic_data[0] == 'Caller is not the owner',
+                "Should error if caller is not the owner",
+            )
+        },
+    }
+
+    let current_count = counter.get_counter();
+
+    assert!(current_count == initial_count, "Counter should not have reset")
+}
+
+#[test]
+fn test_reset_counter_as_owner() {
+    let initial_count = 5;
+    let (counter, _) = deploy_counter(initial_count);
+
+    counter.increase_counter();
+
+    start_cheat_caller_address(counter.contract_address, OWNER());
+    counter.reset_counter();
+    stop_cheat_caller_address(counter.contract_address);
+
+    let current_counter = counter.get_counter();
+
+    assert!(current_counter == 0, "Counter should be reset to 0")
 }
