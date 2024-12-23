@@ -26,7 +26,7 @@ const Page: FC = () => {
 
   // Step 3 --> Read counter from contract -- Start
   const contractAddress = "0x055ff33c7860c19c912765e48a540d5c49fa2450db05790c57160fbf2cd39339";
-  const { data: readData, refetch: dataRefetch, isError: readIsError, isLoading: readIsLoading, error: readError } = useReadContract({
+  const { data: readData, refetch: dataRefetch, isError: readIsError, isLoading: readIsLoading, error: readError } = useReadContract<any, any>({
     functionName: "get_counter",
     args: undefined,
     abi: ABI as Abi,
@@ -199,7 +199,7 @@ const Page: FC = () => {
           {/* Step 3 --> Read from a contract -- Start */}
           <div className="p-4 bg-white border-black border">
             <h3 className="text-lg font-bold mb-2">Contract Balance</h3>
-            <p>Balance: {readData?.toString()}</p>
+            <p>Balance: {readData?.toString() || '0'}</p>
             <button
               onClick={() => dataRefetch()}
               className="mt-2 border border-black text-black font-regular py-1 px-3 bg-yellow-300 hover:bg-yellow-500"

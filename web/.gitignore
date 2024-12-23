@@ -45,3 +45,4 @@ package-lock.json
 
 # Include template
 !.env.template
+.vercel
